@@ -1,0 +1,14 @@
+{
+    "name": "intram/wp-plugin",
+    "description": "Use Intram to receive paiement by Mobile Money account, credit card or bank account",
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "INTRAM",
+            "email": "support@intram.cf"
+        }
+    ],
+    "require": {
+        "intram/php-sdk": "dev-master"
+    }
+}
