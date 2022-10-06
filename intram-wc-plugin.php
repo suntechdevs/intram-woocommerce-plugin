@@ -8,8 +8,9 @@
  * Author URI: http://intram.cf
  */
 
-require_once "vendor/intram/php-sdk/src/PayCfa.php";
+require_once "vendor/intram/php-sdk/src/Intram.php";
 
+// Make sure WooCommerce is active
 if (!in_array('woocommerce/woocommerce.php', apply_filters('active_plugins', get_option('active_plugins')))) return;
 
 function wc_offline_add_to_gateways($gateways)
@@ -47,7 +48,6 @@ function wc_offline_gateway_init()
          */
 
 
-
         public function __construct()
         {
 
@@ -57,8 +57,9 @@ function wc_offline_gateway_init()
             $this->id = 'intram_gateway';
             $this->icon = apply_filters('woocommerce_offline_icon', plugins_url('assets/img/logo_small.png', __FILE__));
             $this->has_fields = false;
-            $this->method_title = __('Intram PayCfa', 'wc-intram-paycfa');
-            $this->method_description = __('Use Intram to receive paiement by Mobile Money account, credit card or bank account', 'wc-intram-paycfa');
+            $this->title = array_key_exists('title', $this->settings) ? $this->settings['title'] : '';
+            $this->method_title = "Intram PayCfa";
+            $this->method_description = array_key_exists('description', $this->settings) ? $this->settings['description'] : '';
 
             // Load the settings.
             $this->init_form_fields();
@@ -80,7 +81,7 @@ function wc_offline_gateway_init()
             add_action('woocommerce_update_options_payment_gateways_' . $this->id, array($this, 'process_admin_options'));
             add_action('woocommerce_thankyou_' . $this->id, array($this, 'thankyou_page'));
             add_action('woocommerce_receipt_' . $this->id, array($this, 'receipt_page'));
-            add_action('woocommerce_api_'.strtolower(get_class($this)), array($this, 'on_back'));
+            add_action('woocommerce_api_' . strtolower(get_class($this)), array($this, 'on_intram_back'));
 
 
             // Customer Emails
@@ -225,14 +226,15 @@ function wc_offline_gateway_init()
             $path = plugin_dir_path(__DIR__) . $filename;
             $plugin_information = get_plugin_data($path);
 
-            wp_enqueue_script('setup-intram-script', "https://account.intram.cf/cdn/intramWidget.js", [], $plugin_information['Version'], true);
+            wp_enqueue_script('setup-intram-script', "https://cdn.intram.org/sdk-javascript.js", [], $plugin_information['Version'], true);
             wp_register_script('init-intram-open-widget', plugins_url('assets/js/openWidgetIntram.js', __FILE__), ['setup-intram-script'], 'v1', true);
             if ($this->testmode == 'yes') {
                 $sandbox = true;
             } else {
                 $sandbox = false;
             }
-            $this->paycfa = new \intram\PayCfa\PayCfa(
+
+            $this->paycfa = new Intram\Intram(
                 $this->public_key, $this->private_key,
                 $this->secret,
                 $this->marchand_key, $sandbox);
@@ -256,15 +258,15 @@ function wc_offline_gateway_init()
             $this->paycfa->setPostalAdressStore($this->postalAdressStore);
             $items = $order->get_items();
             $tab_items = [];
-            $i=0;
-                foreach ( $items as $item ) {
+            $i = 0;
+            foreach ($items as $item) {
 
-                    $tab_items[$i] = ['name' => $item->get_name(),
-                        'quantity' => $item->get_quantity(),
-                        'price' => ($item->get_subtotal()/$item->get_quantity()),
-                        'total_amount' => $item->get_total()];
-                    $i++;
-                }
+                $tab_items[$i] = ['name' => $item->get_name(),
+                    'quantity' => $item->get_quantity(),
+                    'price' => ($item->get_subtotal() / $item->get_quantity()),
+                    'total_amount' => $item->get_total()];
+                $i++;
+            }
 
             $this->paycfa->setItems($tab_items);
             $this->paycfa->setTva([["name" => "VAT (18%)", "amount" => 0]]);
@@ -279,19 +281,25 @@ function wc_offline_gateway_init()
             $this->paycfa->setCurrency($this->currency);
             $this->paycfa->setDescription($this->description);
             $this->paycfa->setTemplate($this->template);
-            $this->paycfa->setRedirectionUrl($this->get_callback_url($order));
+            $this->paycfa->setRedirectionUrl($this->get_callback_url($order_id));
             $this->paycfa->setReturnUrl($this->returnUrl);
             $this->paycfa->setCancelUrl($this->cancelUrl);
-            $response = json_decode($this->paycfa->setRequestPayment());
+            $response = $this->paycfa->setRequestPayment();
             $receipt_url = $response->receipt_url;
             $transaction_id = $response->transaction_id;
-            $error = $response->error;
+            $error = $response->status != "PENDING";
 
             if (!$error) {
                 $this->dataWidget = [
                     "url" => $receipt_url,
-                    "key" => $this->public_key,
-                    "transaction_id"=>$transaction_id
+                    "transaction_id" => $transaction_id,
+                    "public_key" => $this->public_key,
+                    "nameStore" => $this->nameStore,
+                    "color" => $this->color,
+                    "urlLogo" => $this->url,
+                    "callback_url" => $this->get_callback_url($order_id),
+                    "sandbox" => $this->testmode == 'yes',
+                    "response" => $response
                 ];
                 session_start();
                 $_SESSION['dataWidget'] = $this->dataWidget;
@@ -312,8 +320,6 @@ function wc_offline_gateway_init()
          */
         public function receipt_page($order)
         {
-
-
             //TODO: add transaction reason
 
             $order = wc_get_order($order);
@@ -336,22 +342,45 @@ function wc_offline_gateway_init()
             wp_localize_script('init-intram-open-widget', 'data', $data);
         }
 
-        public function on_back()
+        public function on_intram_back()
         {
             global $woocommerce;
-            $order_id = $_GET["state"];
             session_start();
+            $pos = strpos($_GET["state"], "?");
+            $order_id = substr($_GET["state"],0,$pos);
             $order = wc_get_order($order_id);
-            $order->update_status( 'completed' );
-            $order->add_order_note(__('Intram Payment was successful', 'wc-intram-paycfa'));
-            $order->add_order_note('Intram transaction: ' . $_SESSION['dataWidget']['transaction_id']);
-            $customer_note = __('Thank you for your order.<br>', 'wc-intram-paycfa');
-            $customer_note .= __('Your payment was successful, we are now <strong>processing</strong> your order.', 'wc-intram-paycfa');
+
+            if ($order) {
+                $order->update_status('completed');
+                $order->add_order_note(__('Intram Payment was successful', 'wc-intram-paycfa'));
+                $order->add_order_note('Intram transaction: ' . $_SESSION['dataWidget']['transaction_id']);
+                $customer_note = __('Thank you for your order.<br>', 'wc-intram-paycfa');
+                $customer_note .= __('Your payment was successful, we are now <strong>processing</strong> your order.', 'wc-intram-paycfa');
+                $order->add_order_note($customer_note, 1);
+                wc_add_notice($customer_note, 'notice');
+                $woocommerce->cart->empty_cart();
+                $url = get_site_url().'/index.php/my-account/view-order/'.$order_id;
+                wp_redirect($url);
+            }else{
+                $customer_note = __('Your payment <strong>failed</strong>. ', 'wc-intram-paycfa');
+                $customer_note .= __('Please, try funding your account. : '.$this->get_return_url($order), 'wc-intram-paycfa');
+                wc_add_notice($customer_note, 'notice');
+                $url = wc_get_checkout_url();
+                wp_redirect($url);
+            }
+
+        }
+
+        public function handlePaymentFailed($order)
+        {
+            $order->add_order_note(__('The order payment failed on Intram', 'wc-intram-paycfa'));
+            $customer_note = __('Your payment <strong>failed</strong>. ', 'wc-intram-paycfa');
+            $customer_note .= __('Please, try funding your account.', 'wc-intram-paycfa');
             $order->add_order_note($customer_note, 1);
             wc_add_notice($customer_note, 'notice');
-            $woocommerce->cart->empty_cart();
-            wp_redirect($this->get_return_url($order));
 
+            $url = wc_get_checkout_url();
+            wp_redirect($url);
         }
 
     }
